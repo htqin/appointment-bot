@@ -1,10 +1,10 @@
-name: Inspect HKID Quota Page
+name: Test HKID Availability Parser
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspect:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,33 +18,35 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Inspect page
+      - name: Read HKID availability
         run: |
           python - <<'PY'
+          import re
           from playwright.sync_api import sync_playwright
 
           URL = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
 
+          OFFICES = {
+              "RHK": "港島辦事處",
+              "RKO": "九龍辦事處",
+              "RTK": "將軍澳辦事處",
+              "FTO": "火炭辦事處",
+              "TMO": "屯門辦事處",
+              "YLO": "元朗辦事處",
+          }
+
+          STATUS_WORDS = [
+              "尚有名額",
+              "少量名額",
+              "已滿",
+          ]
+
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
 
-              page = browser.new_page()
-
-              # 记录网页后台发出的数据请求
-              def log_response(response):
-                  try:
-                      req = response.request
-                      if req.resource_type in ("xhr", "fetch"):
-                          print(
-                              "DATA_REQUEST",
-                              response.status,
-                              req.method,
-                              response.url
-                          )
-                  except:
-                      pass
-
-              page.on("response", log_response)
+              page = browser.new_page(
+                  viewport={"width": 1440, "height": 1200}
+              )
 
               page.goto(
                   URL,
@@ -52,65 +54,75 @@ jobs:
                   timeout=90000
               )
 
-              print("")
-              print("========== PAGE ==========")
-              print("TITLE:", page.title())
-              print("URL:", page.url)
+              select = page.locator("select").first
 
-              selects = page.locator("select")
-
-              print("")
-              print("========== DROPDOWNS ==========")
-              print("Number of selects:", selects.count())
-
-              for i in range(selects.count()):
-                  select = selects.nth(i)
+              for code, office_name in OFFICES.items():
 
                   print("")
-                  print("SELECT", i)
+                  print("=" * 60)
+                  print(office_name, code)
+                  print("=" * 60)
 
-                  options = select.locator("option")
+                  select.select_option(value=code)
+                  page.wait_for_timeout(1500)
 
-                  for j in range(options.count()):
-                      option = options.nth(j)
+                  rows = page.locator("tr")
 
-                      print(
-                          j,
-                          "|",
-                          option.inner_text().strip(),
-                          "| value =",
-                          option.get_attribute("value")
-                      )
+                  found = []
 
-              # 尝试逐个切换第一个下拉框
-              if selects.count() > 0:
-                  select = selects.nth(0)
-                  options = select.locator("option")
-
-                  print("")
-                  print("========== SWITCH OFFICES ==========")
-
-                  for j in range(options.count()):
-                      value = options.nth(j).get_attribute("value")
-                      text = options.nth(j).inner_text().strip()
-
-                      if not value:
-                          continue
-
-                      print("")
-                      print("SWITCHING TO:", text, "|", value)
+                  for i in range(rows.count()):
+                      row = rows.nth(i)
 
                       try:
-                          select.select_option(value=value)
-                          page.wait_for_timeout(3000)
+                          text = " ".join(
+                              row.inner_text().split()
+                          )
 
-                          body = page.locator("body").inner_text()
+                          # 有些状态可能写在图片 alt/title 中
+                          extra = []
 
-                          print("BODY PREVIEW:")
-                          print(body[:1200])
+                          for attr in ["alt", "title"]:
+                              nodes = row.locator(f"[{attr}]")
 
-                      except Exception as e:
-                          print("SWITCH ERROR:", str(e))
+                              for j in range(nodes.count()):
+                                  value = nodes.nth(j).get_attribute(attr)
+
+                                  if value:
+                                      extra.append(value)
+
+                          combined = text + " " + " ".join(extra)
+
+                          date_match = re.search(
+                              r"(\d{2}/\d{2})",
+                              combined
+                          )
+
+                          status = None
+
+                          for word in STATUS_WORDS:
+                              if word in combined:
+                                  status = word
+                                  break
+
+                          if date_match and status:
+                              found.append(
+                                  (
+                                      date_match.group(1),
+                                      status
+                                  )
+                              )
+
+                      except Exception:
+                          pass
+
+                  if found:
+                      for date, status in found:
+                          print(date, "|", status)
+
+                  else:
+                      print(
+                          "No structured rows found."
+                      )
 
               browser.close()
           PY
