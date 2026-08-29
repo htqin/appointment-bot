@@ -1,4 +1,4 @@
-name: Test PushPlus
+name: Test HKID Direct API
 
 on:
   workflow_dispatch:
@@ -8,35 +8,118 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send PushPlus test message
-        env:
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      - name: Check HKID quota API
         run: |
           python - <<'PY'
-          import os
           import json
+          import time
           import urllib.request
+          from datetime import datetime
 
-          token = os.environ["PUSHPLUS_TOKEN"]
+          ms = int(time.time() * 1000)
 
-          data = {
-              "token": token,
-              "title": "HKID Monitor",
-              "content": "HKID Monitor 测试成功",
-              "template": "txt"
-          }
+          url = (
+              "https://eservices.es2.immd.gov.hk/"
+              "surgecontrolgate/ticket/getSituation"
+              f"?svcId=579&t={ms}&_={ms}"
+          )
 
           req = urllib.request.Request(
-              "https://www.pushplus.plus/send",
-              data=json.dumps(data).encode("utf-8"),
+              url,
               headers={
-                  "Content-Type": "application/json"
-              },
-              method="POST"
+                  "User-Agent": (
+                      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 Chrome/151 Safari/537.36"
+                  ),
+                  "Referer": (
+                      "https://eservices.es2.immd.gov.hk/"
+                      "es/quota-enquiry-client/?l=zh-HK&appId=579"
+                  ),
+                  "Accept": "application/json,text/plain,*/*",
+              }
           )
 
           with urllib.request.urlopen(req, timeout=30) as r:
-              body = r.read().decode("utf-8")
-              print("PushPlus response:")
-              print(body)
+              payload = json.loads(
+                  r.read().decode("utf-8")
+              )
+
+          print("Top-level keys:", list(payload.keys()))
+
+          data = payload.get("data", [])
+          offices = payload.get("office", [])
+
+          print("Quota rows:", len(data))
+          print("Offices:", len(offices))
+          print(
+              "Official last update:",
+              payload.get("lastUpdateTime")
+          )
+
+          office_names = {
+              "RHK": "港島辦事處",
+              "RKO": "九龍辦事處",
+              "RTK": "將軍澳辦事處",
+              "FTO": "火炭辦事處",
+              "TMO": "屯門辦事處",
+              "YLO": "元朗辦事處",
+          }
+
+          statuses = {
+              "quota-r": "已滿",
+              "quota-y": "少量名額",
+              "quota-g": "尚有名額",
+          }
+
+          for code, name in office_names.items():
+
+              available = []
+
+              for row in data:
+
+                  if row.get("officeId") != code:
+                      continue
+
+                  # 一般服务时段 + 延长服务时段
+                  for field in ("quotaR", "quotaK"):
+
+                      status_code = row.get(field)
+
+                      if status_code in (
+                          "quota-g",
+                          "quota-y",
+                      ):
+                          available.append(
+                              (
+                                  row.get("date"),
+                                  field,
+                                  statuses[status_code]
+                              )
+                          )
+
+              available.sort(
+                  key=lambda x:
+                  datetime.strptime(
+                      x[0],
+                      "%m/%d/%Y"
+                  )
+              )
+
+              print()
+              print("=" * 50)
+              print(name, code)
+              print("=" * 50)
+
+              if available:
+                  print(
+                      "最早:",
+                      available[0][0],
+                      "|",
+                      available[0][1],
+                      "|",
+                      available[0][2]
+                  )
+              else:
+                  print("没有可预约名额")
+
           PY
