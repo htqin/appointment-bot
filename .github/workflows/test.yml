@@ -1,10 +1,10 @@
-name: Inspect HKID Date Cells
+name: Test HKID Monitor
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspect:
+  monitor:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,19 +18,74 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Inspect date cells
+      - name: Check HKID availability
         run: |
           python - <<'PY'
-          import re
+          from datetime import datetime, date, timedelta
+          from zoneinfo import ZoneInfo
           from playwright.sync_api import sync_playwright
 
           URL = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
 
+          # 你的当前预约日期
+          CURRENT_BOOKING = date(2026, 10, 23)
+
+          OFFICES = {
+              "RHK": "港島辦事處",
+              "RKO": "九龍辦事處",
+              "RTK": "將軍澳辦事處",
+              "FTO": "火炭辦事處",
+              "TMO": "屯門辦事處",
+              "YLO": "元朗辦事處",
+          }
+
+          STATUS = {
+              "quota-r": "已滿",
+              "quota-y": "少量名額",
+              "quota-g": "尚有名額",
+          }
+
+          hk_now = datetime.now(
+              ZoneInfo("Asia/Hong_Kong")
+          )
+
+          today = hk_now.date()
+
+          def parse_date(text):
+              # 例如：
+              # 31/08 (星期一)
+              dm = text.split()[0]
+              day, month = map(int, dm.split("/"))
+
+              candidate = date(
+                  today.year,
+                  month,
+                  day
+              )
+
+              # 处理跨年，例如 2026年12月后看到 2027年1月
+              if candidate < today - timedelta(days=30):
+                  candidate = date(
+                      today.year + 1,
+                      month,
+                      day
+                  )
+
+              return candidate
+
+          all_available = []
+
           with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
+
+              browser = p.chromium.launch(
+                  headless=True
+              )
 
               page = browser.new_page(
-                  viewport={"width": 1440, "height": 1200}
+                  viewport={
+                      "width": 1440,
+                      "height": 1200
+                  }
               )
 
               page.goto(
@@ -39,183 +94,229 @@ jobs:
                   timeout=90000
               )
 
-              # 先固定检查港岛办事处
-              select = page.locator("select").first
-              select.select_option(value="RHK")
-              page.wait_for_timeout(2000)
+              office_select = page.locator(
+                  "select"
+              ).first
 
-              print("===== STATUS TEXT SEARCH =====")
+              for code, office_name in OFFICES.items():
 
-              html = page.content()
+                  office_select.select_option(
+                      value=code
+                  )
 
-              for word in [
-                  "尚有名額",
-                  "少量名額",
-                  "已滿",
-                  "available",
-                  "full",
-                  "quota"
-              ]:
+                  page.wait_for_timeout(1000)
+
+                  rows = page.locator(
+                      'tbody tr'
+                  )
+
+                  office_available = []
+
+                  for i in range(rows.count()):
+
+                      row = rows.nth(i)
+
+                      date_cell = row.locator(
+                          'td[data-rol="date"]'
+                      )
+
+                      quota_cell = row.locator(
+                          'td[data-rol="quotaR"] div'
+                      )
+
+                      if (
+                          date_cell.count() == 0
+                          or quota_cell.count() == 0
+                      ):
+                          continue
+
+                      date_text = (
+                          date_cell.inner_text()
+                          .strip()
+                      )
+
+                      quota_class = (
+                          quota_cell
+                          .get_attribute("class")
+                          or ""
+                      ).strip()
+
+                      if quota_class not in STATUS:
+                          continue
+
+                      appointment_date = parse_date(
+                          date_text
+                      )
+
+                      status = STATUS[
+                          quota_class
+                      ]
+
+                      # 只关心有名额的日期
+                      if quota_class in (
+                          "quota-g",
+                          "quota-y",
+                      ):
+                          item = {
+                              "date":
+                                  appointment_date,
+                              "date_text":
+                                  date_text,
+                              "office":
+                                  office_name,
+                              "code":
+                                  code,
+                              "status":
+                                  status,
+                          }
+
+                          office_available.append(
+                              item
+                          )
+
+                          all_available.append(
+                              item
+                          )
+
+                  print("")
+                  print("=" * 55)
+                  print(office_name)
+                  print("=" * 55)
+
+                  if not office_available:
+                      print("没有发现可预约日期")
+                      continue
+
+                  office_available.sort(
+                      key=lambda x: x["date"]
+                  )
+
+                  earliest = office_available[0]
+
                   print(
-                      word,
-                      "=>",
-                      word.lower() in html.lower()
+                      "最早:",
+                      earliest["date"],
+                      "|",
+                      earliest["status"]
+                  )
+
+                  earlier = [
+                      x for x in office_available
+                      if x["date"] < CURRENT_BOOKING
+                  ]
+
+                  if earlier:
+                      print(
+                          "✅ 有早于当前预约的日期:",
+                          len(earlier),
+                          "个"
+                      )
+
+                      for x in earlier[:10]:
+                          print(
+                              x["date"],
+                              "|",
+                              x["status"]
+                          )
+                  else:
+                      print(
+                          "❌ 没有早于",
+                          CURRENT_BOOKING,
+                          "的日期"
+                      )
+
+              browser.close()
+
+          print("")
+          print("")
+          print("#" * 65)
+          print("全香港结果")
+          print("#" * 65)
+
+          earlier_slots = [
+              x for x in all_available
+              if x["date"] < CURRENT_BOOKING
+          ]
+
+          if not earlier_slots:
+
+              print(
+                  "❌ 当前没有发现早于",
+                  CURRENT_BOOKING,
+                  "的预约名额"
+              )
+
+          else:
+
+              earlier_slots.sort(
+                  key=lambda x: (
+                      x["date"],
+                      0 if x["status"]
+                      == "尚有名額" else 1,
+                      x["office"],
+                  )
+              )
+
+              earliest_date = (
+                  earlier_slots[0]["date"]
+              )
+
+              earliest_slots = [
+                  x for x in earlier_slots
+                  if x["date"] == earliest_date
+              ]
+
+              print("")
+              print("🚨🚨🚨 发现更早 HKID 名额 🚨🚨🚨")
+              print("")
+              print(
+                  "当前预约:",
+                  CURRENT_BOOKING
+              )
+              print(
+                  "全港最早日期:",
+                  earliest_date
+              )
+
+              days = (
+                  CURRENT_BOOKING
+                  - earliest_date
+              ).days
+
+              print(
+                  "提前:",
+                  days,
+                  "天"
+              )
+
+              print("")
+              print("该日期可选办事处:")
+
+              for x in earliest_slots:
+                  print(
+                      " -",
+                      x["office"],
+                      "|",
+                      x["status"]
                   )
 
               print("")
-              print("===== DATE ELEMENTS =====")
+              print("全部早于当前预约的名额:")
 
-              result = page.evaluate("""
-              () => {
-                  const dateRegex = /^\\d{2}\\/\\d{2}/;
-                  const out = [];
+              for x in earlier_slots:
+                  print(
+                      x["date"],
+                      "|",
+                      x["office"],
+                      "|",
+                      x["status"]
+                  )
 
-                  const elements = Array.from(
-                      document.querySelectorAll("body *")
-                  );
-
-                  for (const el of elements) {
-                      const ownText =
-                          Array.from(el.childNodes)
-                          .filter(n => n.nodeType === Node.TEXT_NODE)
-                          .map(n => n.textContent.trim())
-                          .join(" ")
-                          .trim();
-
-                      if (!dateRegex.test(ownText)) {
-                          continue;
-                      }
-
-                      let current = el;
-
-                      const chain = [];
-
-                      for (let level = 0;
-                           level < 5 && current;
-                           level++) {
-
-                          chain.push({
-                              level: level,
-                              tag: current.tagName,
-                              id: current.id || "",
-                              class:
-                                  current.className &&
-                                  typeof current.className === "string"
-                                  ? current.className
-                                  : "",
-                              text:
-                                  (current.innerText || "")
-                                  .replace(/\\s+/g, " ")
-                                  .trim()
-                                  .slice(0, 300),
-                              html:
-                                  current.outerHTML
-                                  .replace(/\\s+/g, " ")
-                                  .slice(0, 1200)
-                          });
-
-                          current = current.parentElement;
-                      }
-
-                      out.push({
-                          date: ownText,
-                          chain: chain
-                      });
-
-                      if (out.length >= 6) {
-                          break;
-                      }
-                  }
-
-                  return out;
-              }
-              """)
-
-              for item in result:
-                  print("")
-                  print("################################")
-                  print("DATE:", item["date"])
-                  print("################################")
-
-                  for node in item["chain"]:
-                      print("")
-                      print(
-                          "LEVEL",
-                          node["level"],
-                          "| TAG =", node["tag"],
-                          "| ID =", node["id"],
-                          "| CLASS =", node["class"]
-                      )
-
-                      print("TEXT:")
-                      print(node["text"])
-
-                      print("HTML:")
-                      print(node["html"])
-
-              print("")
-              print("===== POSSIBLE STATUS ELEMENTS =====")
-
-              candidates = page.evaluate("""
-              () => {
-                  const result = [];
-
-                  const elements = Array.from(
-                      document.querySelectorAll(
-                          "[class], [style], svg, img"
-                      )
-                  );
-
-                  for (const el of elements) {
-                      const cls =
-                          typeof el.className === "string"
-                          ? el.className
-                          : "";
-
-                      const style =
-                          el.getAttribute("style") || "";
-
-                      const aria =
-                          el.getAttribute("aria-label") || "";
-
-                      const text =
-                          (el.innerText || "")
-                          .replace(/\\s+/g, " ")
-                          .trim();
-
-                      const combined =
-                          (cls + " " +
-                           style + " " +
-                           aria + " " +
-                           text).toLowerCase();
-
-                      if (
-                          combined.includes("quota") ||
-                          combined.includes("available") ||
-                          combined.includes("full") ||
-                          combined.includes("status") ||
-                          combined.includes("green") ||
-                          combined.includes("yellow") ||
-                          combined.includes("red")
-                      ) {
-                          result.push(
-                              el.outerHTML
-                              .replace(/\\s+/g, " ")
-                              .slice(0, 1000)
-                          );
-                      }
-
-                      if (result.length >= 30) {
-                          break;
-                      }
-                  }
-
-                  return result;
-              }
-              """)
-
-              for x in candidates:
-                  print(x)
-
-              browser.close()
+          print("")
+          print(
+              "检测时间（香港）:",
+              hk_now.strftime(
+                  "%Y-%m-%d %H:%M:%S"
+              )
+          )
           PY
