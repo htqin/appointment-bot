@@ -1,0 +1,515 @@
+name: HKID Quota Monitor
+
+on:
+  schedule:
+    # ==================================================
+    # 常规检测：每 5 分钟
+    # GitHub Cron 使用 UTC
+    # ==================================================
+    - cron: "*/5 * * * *"
+
+    # ==================================================
+    # 以下是额外独立检测时间
+    # 香港 = UTC+8
+    #
+    # 00:15、09:00、09:30、20:30
+    # 已经包含在每5分钟任务里，不需要重复添加
+    # ==================================================
+
+    # 香港 10:12 = UTC 02:12
+    - cron: "12 2 * * *"
+
+    # 香港 14:12 = UTC 06:12
+    - cron: "12 6 * * *"
+
+    # 香港 16:52 = UTC 08:52
+    - cron: "52 8 * * *"
+
+    # 香港 17:52 = UTC 09:52
+    - cron: "52 9 * * *"
+
+    # 香港 22:12 = UTC 14:12
+    - cron: "12 14 * * *"
+
+  # 允许我们手动点 Run workflow 测试
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "Send test WeChat notification"
+        required: false
+        default: false
+        type: boolean
+
+
+# 防止两个任务正好重叠
+concurrency:
+  group: hkid-quota-monitor
+  cancel-in-progress: false
+
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+
+      - name: Check HKID quota
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+
+          # 你的当前预约日期
+          CURRENT_BOOKING: "2026-10-23"
+
+          TEST_NOTIFICATION: ${{ github.event.inputs.test_notification || 'false' }}
+
+        run: |
+          python3 - <<'PY'
+
+          import os
+          import json
+          import time
+          import urllib.request
+
+          from datetime import datetime, date
+          from zoneinfo import ZoneInfo
+
+
+          # ============================================================
+          # 配置
+          # ============================================================
+
+          CURRENT_BOOKING = date.fromisoformat(
+              os.environ["CURRENT_BOOKING"]
+          )
+
+          PUSHPLUS_TOKEN = os.environ["PUSHPLUS_TOKEN"]
+
+          TEST_NOTIFICATION = (
+              os.environ.get(
+                  "TEST_NOTIFICATION",
+                  "false"
+              ).lower()
+              == "true"
+          )
+
+
+          OFFICES = {
+              "RHK": "港島辦事處",
+              "RKO": "九龍辦事處",
+              "RTK": "將軍澳辦事處",
+              "FTO": "火炭辦事處",
+              "TMO": "屯門辦事處",
+              "YLO": "元朗辦事處",
+          }
+
+
+          STATUS = {
+              "quota-g": "🟢 尚有名額",
+              "quota-y": "🟡 少量名額",
+          }
+
+
+          PERIOD = {
+              "quotaR": "一般服務時段",
+              "quotaK": "延長服務時段",
+          }
+
+
+          BOOKING_URL = (
+              "https://www.gov.hk/tc/apps/"
+              "immdicbooking2.htm"
+          )
+
+
+          # ============================================================
+          # PushPlus
+          # ============================================================
+
+          def send_push(title, content):
+
+              payload = {
+                  "token": PUSHPLUS_TOKEN,
+                  "title": title,
+                  "content": content,
+                  "template": "txt",
+              }
+
+              req = urllib.request.Request(
+                  "https://www.pushplus.plus/send",
+                  data=json.dumps(
+                      payload,
+                      ensure_ascii=False
+                  ).encode("utf-8"),
+                  headers={
+                      "Content-Type": "application/json"
+                  },
+                  method="POST",
+              )
+
+              with urllib.request.urlopen(
+                  req,
+                  timeout=30
+              ) as response:
+
+                  result = json.loads(
+                      response.read().decode("utf-8")
+                  )
+
+              print("PushPlus response:", result)
+
+              if result.get("code") != 200:
+                  raise RuntimeError(
+                      "PushPlus notification failed"
+                  )
+
+
+          # ============================================================
+          # 手动通知测试
+          # ============================================================
+
+          if TEST_NOTIFICATION:
+
+              send_push(
+                  "HKID Monitor 测试",
+                  (
+                      "✅ HKID 正式监控程序运行正常\n\n"
+                      "之后只有发现比当前预约更早的名额"
+                      "才会发送正式警报。"
+                  )
+              )
+
+
+          # ============================================================
+          # 获取香港入境处公开配额
+          # ============================================================
+
+          ms = int(time.time() * 1000)
+
+          api_url = (
+              "https://eservices.es2.immd.gov.hk/"
+              "surgecontrolgate/ticket/getSituation"
+              f"?svcId=579&t={ms}&_={ms}"
+          )
+
+
+          req = urllib.request.Request(
+              api_url,
+              headers={
+                  "User-Agent": (
+                      "Mozilla/5.0 "
+                      "(Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 "
+                      "Chrome/151 Safari/537.36"
+                  ),
+
+                  "Referer": (
+                      "https://eservices.es2.immd.gov.hk/"
+                      "es/quota-enquiry-client/"
+                      "?l=zh-HK&appId=579"
+                  ),
+
+                  "Accept":
+                      "application/json,text/plain,*/*",
+              }
+          )
+
+
+          with urllib.request.urlopen(
+              req,
+              timeout=30
+          ) as response:
+
+              data = json.loads(
+                  response.read().decode("utf-8")
+              )
+
+
+          rows = data.get("data", [])
+
+          official_update = data.get(
+              "lastUpdateTime",
+              "Unknown"
+          )
+
+
+          if not rows:
+              raise RuntimeError(
+                  "HKID quota API returned no data"
+              )
+
+
+          # ============================================================
+          # 查找所有早于当前预约的空位
+          # ============================================================
+
+          available = []
+
+
+          for row in rows:
+
+              office_code = row.get("officeId")
+
+              if office_code not in OFFICES:
+                  continue
+
+
+              raw_date = row.get("date")
+
+              if not raw_date:
+                  continue
+
+
+              try:
+
+                  slot_date = datetime.strptime(
+                      raw_date,
+                      "%m/%d/%Y"
+                  ).date()
+
+              except ValueError:
+                  continue
+
+
+              # 不关心相同日期或更晚日期
+              if slot_date >= CURRENT_BOOKING:
+                  continue
+
+
+              # 同时检查普通和延长服务时段
+              for quota_field in (
+                  "quotaR",
+                  "quotaK"
+              ):
+
+                  quota_status = row.get(
+                      quota_field
+                  )
+
+
+                  if quota_status not in (
+                      "quota-g",
+                      "quota-y"
+                  ):
+                      continue
+
+
+                  available.append(
+                      {
+                          "date": slot_date,
+
+                          "office":
+                              OFFICES[
+                                  office_code
+                              ],
+
+                          "office_code":
+                              office_code,
+
+                          "period":
+                              PERIOD[
+                                  quota_field
+                              ],
+
+                          "status":
+                              STATUS[
+                                  quota_status
+                              ],
+                      }
+                  )
+
+
+          hk_now = datetime.now(
+              ZoneInfo("Asia/Hong_Kong")
+          )
+
+
+          # ============================================================
+          # 没有更早位置
+          # ============================================================
+
+          if not available:
+
+              print("")
+              print(
+                  "❌ No earlier HKID slot."
+              )
+
+              print(
+                  "Current booking:",
+                  CURRENT_BOOKING
+              )
+
+              print(
+                  "Official update:",
+                  official_update
+              )
+
+              print(
+                  "Check time:",
+                  hk_now.strftime(
+                      "%Y-%m-%d %H:%M:%S"
+                  )
+              )
+
+              raise SystemExit(0)
+
+
+          # ============================================================
+          # 排序
+          # ============================================================
+
+          available.sort(
+              key=lambda x: (
+                  x["date"],
+                  x["office_code"],
+                  x["period"],
+              )
+          )
+
+
+          earliest_date = available[0]["date"]
+
+
+          earliest_slots = [
+              x for x in available
+              if x["date"] == earliest_date
+          ]
+
+
+          days_earlier = (
+              CURRENT_BOOKING
+              - earliest_date
+          ).days
+
+
+          # ============================================================
+          # 构造微信通知
+          # ============================================================
+
+          lines = [
+
+              "🚨 HKID 發現更早預約！",
+
+              "",
+
+              f"目前預約："
+              f"{CURRENT_BOOKING.isoformat()}",
+
+              f"🔥 全港最早："
+              f"{earliest_date.isoformat()}",
+
+              f"提前：{days_earlier} 天",
+
+              "",
+
+              "最早日期可選：",
+          ]
+
+
+          for slot in earliest_slots:
+
+              lines.append(
+                  "• "
+                  + slot["office"]
+                  + " | "
+                  + slot["period"]
+                  + " | "
+                  + slot["status"]
+              )
+
+
+          # 额外显示所有其它更早位置
+          other_dates = sorted(
+              set(
+                  x["date"]
+                  for x in available
+                  if x["date"] != earliest_date
+              )
+          )
+
+
+          if other_dates:
+
+              lines.extend(
+                  [
+                      "",
+                      "其他較早日期：",
+                  ]
+              )
+
+              for d in other_dates[:10]:
+
+                  locations = sorted(
+                      set(
+                          x["office"]
+                          for x in available
+                          if x["date"] == d
+                      )
+                  )
+
+                  lines.append(
+                      "• "
+                      + d.isoformat()
+                      + " | "
+                      + "、".join(locations)
+                  )
+
+
+          lines.extend(
+              [
+                  "",
+
+                  "官方資料更新："
+                  + str(official_update),
+
+                  "本次檢測："
+                  + hk_now.strftime(
+                      "%Y-%m-%d %H:%M:%S"
+                  ),
+
+                  "",
+
+                  "⚡ 請立即自行預約",
+
+                  BOOKING_URL,
+              ]
+          )
+
+
+          message = "\n".join(lines)
+
+
+          # ============================================================
+          # 每次发现名额都发送
+          #
+          # 不去重！
+          # 因此只要名额继续存在：
+          #
+          # 10:00 发
+          # 10:05 发
+          # 10:10 发
+          # ...
+          # ============================================================
+
+          send_push(
+              "🚨 HKID 有更早預約",
+              message
+          )
+
+
+          print("")
+          print(
+              "🚨 Earlier slot found."
+          )
+
+          print(
+              "Earliest:",
+              earliest_date
+          )
+
+          print(
+              "Notification sent."
+          )
+
+          PY
