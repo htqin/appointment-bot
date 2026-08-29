@@ -1,1 +1,1 @@
-# hkid-appointment-bot
+# appointment-bot
