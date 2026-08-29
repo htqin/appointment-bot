@@ -1,4 +1,4 @@
-name: Test Bot
+name: Test HKID Browser
 
 on:
   workflow_dispatch:
@@ -8,17 +8,51 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check secrets
-        env:
-          HKID_DOC_NUMBER: ${{ secrets.HKID_DOC_NUMBER }}
-          HKID_BIRTH_DAY: ${{ secrets.HKID_BIRTH_DAY }}
-          HKID_BIRTH_YEAR: ${{ secrets.HKID_BIRTH_YEAR }}
-          HKID_ENQUIRY_CODE: ${{ secrets.HKID_ENQUIRY_CODE }}
-          HKID_DOC_TYPE: ${{ secrets.HKID_DOC_TYPE }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
         run: |
-          if [ -z "$HKID_DOC_NUMBER" ]; then exit 1; fi
-          if [ -z "$HKID_BIRTH_DAY" ]; then exit 1; fi
-          if [ -z "$HKID_BIRTH_YEAR" ]; then exit 1; fi
-          if [ -z "$HKID_ENQUIRY_CODE" ]; then exit 1; fi
-          if [ -z "$HKID_DOC_TYPE" ]; then exit 1; fi
-          echo "All 5 HKID secrets are available."
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Open HKID booking website
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          url = "https://www.gov.hk/en/apps/immdicbooking2.htm"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+
+              page = browser.new_page(
+                  viewport={"width": 1440, "height": 1000}
+              )
+
+              response = page.goto(
+                  url,
+                  wait_until="domcontentloaded",
+                  timeout=60000
+              )
+
+              print("HTTP status:", response.status if response else "No response")
+              print("Final URL:", page.url)
+              print("Page title:", page.title())
+
+              page.screenshot(
+                  path="hkid-page.png",
+                  full_page=True
+              )
+
+              print("SUCCESS: Chromium opened the HKID website.")
+              browser.close()
+          PY
+
+      - name: Upload screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: hkid-page
+          path: hkid-page.png
