@@ -1,10 +1,10 @@
-name: Test HKID Availability Parser
+name: Inspect HKID Date Cells
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  inspect:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,28 +18,13 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Read HKID availability
+      - name: Inspect date cells
         run: |
           python - <<'PY'
           import re
           from playwright.sync_api import sync_playwright
 
           URL = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
-
-          OFFICES = {
-              "RHK": "港島辦事處",
-              "RKO": "九龍辦事處",
-              "RTK": "將軍澳辦事處",
-              "FTO": "火炭辦事處",
-              "TMO": "屯門辦事處",
-              "YLO": "元朗辦事處",
-          }
-
-          STATUS_WORDS = [
-              "尚有名額",
-              "少量名額",
-              "已滿",
-          ]
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
@@ -54,75 +39,183 @@ jobs:
                   timeout=90000
               )
 
+              # 先固定检查港岛办事处
               select = page.locator("select").first
+              select.select_option(value="RHK")
+              page.wait_for_timeout(2000)
 
-              for code, office_name in OFFICES.items():
+              print("===== STATUS TEXT SEARCH =====")
 
+              html = page.content()
+
+              for word in [
+                  "尚有名額",
+                  "少量名額",
+                  "已滿",
+                  "available",
+                  "full",
+                  "quota"
+              ]:
+                  print(
+                      word,
+                      "=>",
+                      word.lower() in html.lower()
+                  )
+
+              print("")
+              print("===== DATE ELEMENTS =====")
+
+              result = page.evaluate("""
+              () => {
+                  const dateRegex = /^\\d{2}\\/\\d{2}/;
+                  const out = [];
+
+                  const elements = Array.from(
+                      document.querySelectorAll("body *")
+                  );
+
+                  for (const el of elements) {
+                      const ownText =
+                          Array.from(el.childNodes)
+                          .filter(n => n.nodeType === Node.TEXT_NODE)
+                          .map(n => n.textContent.trim())
+                          .join(" ")
+                          .trim();
+
+                      if (!dateRegex.test(ownText)) {
+                          continue;
+                      }
+
+                      let current = el;
+
+                      const chain = [];
+
+                      for (let level = 0;
+                           level < 5 && current;
+                           level++) {
+
+                          chain.push({
+                              level: level,
+                              tag: current.tagName,
+                              id: current.id || "",
+                              class:
+                                  current.className &&
+                                  typeof current.className === "string"
+                                  ? current.className
+                                  : "",
+                              text:
+                                  (current.innerText || "")
+                                  .replace(/\\s+/g, " ")
+                                  .trim()
+                                  .slice(0, 300),
+                              html:
+                                  current.outerHTML
+                                  .replace(/\\s+/g, " ")
+                                  .slice(0, 1200)
+                          });
+
+                          current = current.parentElement;
+                      }
+
+                      out.push({
+                          date: ownText,
+                          chain: chain
+                      });
+
+                      if (out.length >= 6) {
+                          break;
+                      }
+                  }
+
+                  return out;
+              }
+              """)
+
+              for item in result:
                   print("")
-                  print("=" * 60)
-                  print(office_name, code)
-                  print("=" * 60)
+                  print("################################")
+                  print("DATE:", item["date"])
+                  print("################################")
 
-                  select.select_option(value=code)
-                  page.wait_for_timeout(1500)
-
-                  rows = page.locator("tr")
-
-                  found = []
-
-                  for i in range(rows.count()):
-                      row = rows.nth(i)
-
-                      try:
-                          text = " ".join(
-                              row.inner_text().split()
-                          )
-
-                          # 有些状态可能写在图片 alt/title 中
-                          extra = []
-
-                          for attr in ["alt", "title"]:
-                              nodes = row.locator(f"[{attr}]")
-
-                              for j in range(nodes.count()):
-                                  value = nodes.nth(j).get_attribute(attr)
-
-                                  if value:
-                                      extra.append(value)
-
-                          combined = text + " " + " ".join(extra)
-
-                          date_match = re.search(
-                              r"(\d{2}/\d{2})",
-                              combined
-                          )
-
-                          status = None
-
-                          for word in STATUS_WORDS:
-                              if word in combined:
-                                  status = word
-                                  break
-
-                          if date_match and status:
-                              found.append(
-                                  (
-                                      date_match.group(1),
-                                      status
-                                  )
-                              )
-
-                      except Exception:
-                          pass
-
-                  if found:
-                      for date, status in found:
-                          print(date, "|", status)
-
-                  else:
+                  for node in item["chain"]:
+                      print("")
                       print(
-                          "No structured rows found."
+                          "LEVEL",
+                          node["level"],
+                          "| TAG =", node["tag"],
+                          "| ID =", node["id"],
+                          "| CLASS =", node["class"]
                       )
+
+                      print("TEXT:")
+                      print(node["text"])
+
+                      print("HTML:")
+                      print(node["html"])
+
+              print("")
+              print("===== POSSIBLE STATUS ELEMENTS =====")
+
+              candidates = page.evaluate("""
+              () => {
+                  const result = [];
+
+                  const elements = Array.from(
+                      document.querySelectorAll(
+                          "[class], [style], svg, img"
+                      )
+                  );
+
+                  for (const el of elements) {
+                      const cls =
+                          typeof el.className === "string"
+                          ? el.className
+                          : "";
+
+                      const style =
+                          el.getAttribute("style") || "";
+
+                      const aria =
+                          el.getAttribute("aria-label") || "";
+
+                      const text =
+                          (el.innerText || "")
+                          .replace(/\\s+/g, " ")
+                          .trim();
+
+                      const combined =
+                          (cls + " " +
+                           style + " " +
+                           aria + " " +
+                           text).toLowerCase();
+
+                      if (
+                          combined.includes("quota") ||
+                          combined.includes("available") ||
+                          combined.includes("full") ||
+                          combined.includes("status") ||
+                          combined.includes("green") ||
+                          combined.includes("yellow") ||
+                          combined.includes("red")
+                      ) {
+                          result.push(
+                              el.outerHTML
+                              .replace(/\\s+/g, " ")
+                              .slice(0, 1000)
+                          );
+                      }
+
+                      if (result.length >= 30) {
+                          break;
+                      }
+                  }
+
+                  return result;
+              }
+              """)
+
+              for x in candidates:
+                  print(x)
 
               browser.close()
           PY
