@@ -1,10 +1,10 @@
-name: Test HKID Quota Page
+name: Inspect HKID Quota Page
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  inspect:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,43 +18,99 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Open public HKID quota page
+      - name: Inspect page
         run: |
           python - <<'PY'
           from playwright.sync_api import sync_playwright
 
-          url = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
+          URL = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
 
-              page = browser.new_page(
-                  viewport={"width": 1440, "height": 1200}
-              )
+              page = browser.new_page()
+
+              # 记录网页后台发出的数据请求
+              def log_response(response):
+                  try:
+                      req = response.request
+                      if req.resource_type in ("xhr", "fetch"):
+                          print(
+                              "DATA_REQUEST",
+                              response.status,
+                              req.method,
+                              response.url
+                          )
+                  except:
+                      pass
+
+              page.on("response", log_response)
 
               page.goto(
-                  url,
+                  URL,
                   wait_until="networkidle",
                   timeout=90000
               )
 
-              print("Final URL:", page.url)
-              print("Page title:", page.title())
+              print("")
+              print("========== PAGE ==========")
+              print("TITLE:", page.title())
+              print("URL:", page.url)
 
-              text = page.locator("body").inner_text()
-              print("BODY PREVIEW:")
-              print(text[:3000])
+              selects = page.locator("select")
 
-              page.screenshot(
-                  path="hkid-quota-page.png",
-                  full_page=True
-              )
+              print("")
+              print("========== DROPDOWNS ==========")
+              print("Number of selects:", selects.count())
+
+              for i in range(selects.count()):
+                  select = selects.nth(i)
+
+                  print("")
+                  print("SELECT", i)
+
+                  options = select.locator("option")
+
+                  for j in range(options.count()):
+                      option = options.nth(j)
+
+                      print(
+                          j,
+                          "|",
+                          option.inner_text().strip(),
+                          "| value =",
+                          option.get_attribute("value")
+                      )
+
+              # 尝试逐个切换第一个下拉框
+              if selects.count() > 0:
+                  select = selects.nth(0)
+                  options = select.locator("option")
+
+                  print("")
+                  print("========== SWITCH OFFICES ==========")
+
+                  for j in range(options.count()):
+                      value = options.nth(j).get_attribute("value")
+                      text = options.nth(j).inner_text().strip()
+
+                      if not value:
+                          continue
+
+                      print("")
+                      print("SWITCHING TO:", text, "|", value)
+
+                      try:
+                          select.select_option(value=value)
+                          page.wait_for_timeout(3000)
+
+                          body = page.locator("body").inner_text()
+
+                          print("BODY PREVIEW:")
+                          print(body[:1200])
+
+                      except Exception as e:
+                          print("SWITCH ERROR:", str(e))
 
               browser.close()
           PY
-
-      - name: Upload screenshot
-        uses: actions/upload-artifact@v4
-        with:
-          name: hkid-quota-page
-          path: hkid-quota-page.png
