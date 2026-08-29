@@ -8,5 +8,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test
-        run: echo "HKID bot is working!"
+      - name: Check secrets
+        env:
+          HKID_DOC_NUMBER: ${{ secrets.HKID_DOC_NUMBER }}
+          HKID_BIRTH_DAY: ${{ secrets.HKID_BIRTH_DAY }}
+          HKID_BIRTH_YEAR: ${{ secrets.HKID_BIRTH_YEAR }}
+          HKID_ENQUIRY_CODE: ${{ secrets.HKID_ENQUIRY_CODE }}
+          HKID_DOC_TYPE: ${{ secrets.HKID_DOC_TYPE }}
+        run: |
+          if [ -z "$HKID_DOC_NUMBER" ]; then exit 1; fi
+          if [ -z "$HKID_BIRTH_DAY" ]; then exit 1; fi
+          if [ -z "$HKID_BIRTH_YEAR" ]; then exit 1; fi
+          if [ -z "$HKID_ENQUIRY_CODE" ]; then exit 1; fi
+          if [ -z "$HKID_DOC_TYPE" ]; then exit 1; fi
+          echo "All 5 HKID secrets are available."
