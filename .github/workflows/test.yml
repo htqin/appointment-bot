@@ -1,4 +1,4 @@
-name: Test HKID Browser
+name: Test HKID Quota Page
 
 on:
   workflow_dispatch:
@@ -18,41 +18,43 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Open HKID booking website
+      - name: Open public HKID quota page
         run: |
           python - <<'PY'
           from playwright.sync_api import sync_playwright
 
-          url = "https://www.gov.hk/en/apps/immdicbooking2.htm"
+          url = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
 
               page = browser.new_page(
-                  viewport={"width": 1440, "height": 1000}
+                  viewport={"width": 1440, "height": 1200}
               )
 
-              response = page.goto(
+              page.goto(
                   url,
-                  wait_until="domcontentloaded",
-                  timeout=60000
+                  wait_until="networkidle",
+                  timeout=90000
               )
 
-              print("HTTP status:", response.status if response else "No response")
               print("Final URL:", page.url)
               print("Page title:", page.title())
 
+              text = page.locator("body").inner_text()
+              print("BODY PREVIEW:")
+              print(text[:3000])
+
               page.screenshot(
-                  path="hkid-page.png",
+                  path="hkid-quota-page.png",
                   full_page=True
               )
 
-              print("SUCCESS: Chromium opened the HKID website.")
               browser.close()
           PY
 
       - name: Upload screenshot
         uses: actions/upload-artifact@v4
         with:
-          name: hkid-page
-          path: hkid-page.png
+          name: hkid-quota-page
+          path: hkid-quota-page.png
