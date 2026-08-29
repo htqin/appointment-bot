@@ -1,322 +1,42 @@
-name: Test HKID Monitor
+name: Test PushPlus
 
 on:
   workflow_dispatch:
 
 jobs:
-  monitor:
+  test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Playwright
-        run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
-
-      - name: Check HKID availability
+      - name: Send PushPlus test message
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: |
           python - <<'PY'
-          from datetime import datetime, date, timedelta
-          from zoneinfo import ZoneInfo
-          from playwright.sync_api import sync_playwright
+          import os
+          import json
+          import urllib.request
 
-          URL = "https://www.gov.hk/tc/apps/bookidcardquota.htm"
+          token = os.environ["PUSHPLUS_TOKEN"]
 
-          # 你的当前预约日期
-          CURRENT_BOOKING = date(2026, 10, 23)
-
-          OFFICES = {
-              "RHK": "港島辦事處",
-              "RKO": "九龍辦事處",
-              "RTK": "將軍澳辦事處",
-              "FTO": "火炭辦事處",
-              "TMO": "屯門辦事處",
-              "YLO": "元朗辦事處",
+          data = {
+              "token": token,
+              "title": "HKID Monitor",
+              "content": "HKID Monitor 测试成功",
+              "template": "txt"
           }
 
-          STATUS = {
-              "quota-r": "已滿",
-              "quota-y": "少量名額",
-              "quota-g": "尚有名額",
-          }
-
-          hk_now = datetime.now(
-              ZoneInfo("Asia/Hong_Kong")
+          req = urllib.request.Request(
+              "https://www.pushplus.plus/send",
+              data=json.dumps(data).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json"
+              },
+              method="POST"
           )
 
-          today = hk_now.date()
-
-          def parse_date(text):
-              # 例如：
-              # 31/08 (星期一)
-              dm = text.split()[0]
-              day, month = map(int, dm.split("/"))
-
-              candidate = date(
-                  today.year,
-                  month,
-                  day
-              )
-
-              # 处理跨年，例如 2026年12月后看到 2027年1月
-              if candidate < today - timedelta(days=30):
-                  candidate = date(
-                      today.year + 1,
-                      month,
-                      day
-                  )
-
-              return candidate
-
-          all_available = []
-
-          with sync_playwright() as p:
-
-              browser = p.chromium.launch(
-                  headless=True
-              )
-
-              page = browser.new_page(
-                  viewport={
-                      "width": 1440,
-                      "height": 1200
-                  }
-              )
-
-              page.goto(
-                  URL,
-                  wait_until="networkidle",
-                  timeout=90000
-              )
-
-              office_select = page.locator(
-                  "select"
-              ).first
-
-              for code, office_name in OFFICES.items():
-
-                  office_select.select_option(
-                      value=code
-                  )
-
-                  page.wait_for_timeout(1000)
-
-                  rows = page.locator(
-                      'tbody tr'
-                  )
-
-                  office_available = []
-
-                  for i in range(rows.count()):
-
-                      row = rows.nth(i)
-
-                      date_cell = row.locator(
-                          'td[data-rol="date"]'
-                      )
-
-                      quota_cell = row.locator(
-                          'td[data-rol="quotaR"] div'
-                      )
-
-                      if (
-                          date_cell.count() == 0
-                          or quota_cell.count() == 0
-                      ):
-                          continue
-
-                      date_text = (
-                          date_cell.inner_text()
-                          .strip()
-                      )
-
-                      quota_class = (
-                          quota_cell
-                          .get_attribute("class")
-                          or ""
-                      ).strip()
-
-                      if quota_class not in STATUS:
-                          continue
-
-                      appointment_date = parse_date(
-                          date_text
-                      )
-
-                      status = STATUS[
-                          quota_class
-                      ]
-
-                      # 只关心有名额的日期
-                      if quota_class in (
-                          "quota-g",
-                          "quota-y",
-                      ):
-                          item = {
-                              "date":
-                                  appointment_date,
-                              "date_text":
-                                  date_text,
-                              "office":
-                                  office_name,
-                              "code":
-                                  code,
-                              "status":
-                                  status,
-                          }
-
-                          office_available.append(
-                              item
-                          )
-
-                          all_available.append(
-                              item
-                          )
-
-                  print("")
-                  print("=" * 55)
-                  print(office_name)
-                  print("=" * 55)
-
-                  if not office_available:
-                      print("没有发现可预约日期")
-                      continue
-
-                  office_available.sort(
-                      key=lambda x: x["date"]
-                  )
-
-                  earliest = office_available[0]
-
-                  print(
-                      "最早:",
-                      earliest["date"],
-                      "|",
-                      earliest["status"]
-                  )
-
-                  earlier = [
-                      x for x in office_available
-                      if x["date"] < CURRENT_BOOKING
-                  ]
-
-                  if earlier:
-                      print(
-                          "✅ 有早于当前预约的日期:",
-                          len(earlier),
-                          "个"
-                      )
-
-                      for x in earlier[:10]:
-                          print(
-                              x["date"],
-                              "|",
-                              x["status"]
-                          )
-                  else:
-                      print(
-                          "❌ 没有早于",
-                          CURRENT_BOOKING,
-                          "的日期"
-                      )
-
-              browser.close()
-
-          print("")
-          print("")
-          print("#" * 65)
-          print("全香港结果")
-          print("#" * 65)
-
-          earlier_slots = [
-              x for x in all_available
-              if x["date"] < CURRENT_BOOKING
-          ]
-
-          if not earlier_slots:
-
-              print(
-                  "❌ 当前没有发现早于",
-                  CURRENT_BOOKING,
-                  "的预约名额"
-              )
-
-          else:
-
-              earlier_slots.sort(
-                  key=lambda x: (
-                      x["date"],
-                      0 if x["status"]
-                      == "尚有名額" else 1,
-                      x["office"],
-                  )
-              )
-
-              earliest_date = (
-                  earlier_slots[0]["date"]
-              )
-
-              earliest_slots = [
-                  x for x in earlier_slots
-                  if x["date"] == earliest_date
-              ]
-
-              print("")
-              print("🚨🚨🚨 发现更早 HKID 名额 🚨🚨🚨")
-              print("")
-              print(
-                  "当前预约:",
-                  CURRENT_BOOKING
-              )
-              print(
-                  "全港最早日期:",
-                  earliest_date
-              )
-
-              days = (
-                  CURRENT_BOOKING
-                  - earliest_date
-              ).days
-
-              print(
-                  "提前:",
-                  days,
-                  "天"
-              )
-
-              print("")
-              print("该日期可选办事处:")
-
-              for x in earliest_slots:
-                  print(
-                      " -",
-                      x["office"],
-                      "|",
-                      x["status"]
-                  )
-
-              print("")
-              print("全部早于当前预约的名额:")
-
-              for x in earlier_slots:
-                  print(
-                      x["date"],
-                      "|",
-                      x["office"],
-                      "|",
-                      x["status"]
-                  )
-
-          print("")
-          print(
-              "检测时间（香港）:",
-              hk_now.strftime(
-                  "%Y-%m-%d %H:%M:%S"
-              )
-          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              body = r.read().decode("utf-8")
+              print("PushPlus response:")
+              print(body)
           PY
